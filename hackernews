@@ -1,0 +1,129 @@
+#!/usr/bin/env stack
+-- stack script --resolver lts-12.21
+
+{-# LANGUAGE OverloadedStrings #-}
+
+import           Data.Aeson            (Value)
+import           Data.Aeson.Lens
+import           Control.Lens
+import qualified Data.Yaml             as Yaml
+import           Network.HTTP.Simple
+
+import           Data.List
+import           Data.Function         (on)
+
+import           Streamly
+import qualified Streamly.Prelude      as Stream
+import           Control.Concurrent
+import           Control.Monad.IO.Class
+
+-------------------------------------------------------------------------------
+
+--
+-- Parse JSON data from an URL
+--
+getJson :: String -> IO (Value)
+getJson url =
+    httpJSON request >>= return . getResponseBody
+    where
+        request = parseRequest_ url
+
+--
+-- Build the URL for an item ID
+--
+itemURL :: Integer -> String
+itemURL id =
+    base ++ show id ++ extension
+    where
+        base = "https://hacker-news.firebaseio.com/v0/item/"
+        extension = ".json"
+
+--
+-- Get the first N stories from TopStories
+--
+getTopStories :: Int -> IO [Integer]
+getTopStories n =
+    getJson url >>= return . take n . stories
+    where
+        url = "https://hacker-news.firebaseio.com/v0/topstories.json"
+        stories json = json ^.. values . _Integral
+
+--
+-- Get the username of the item's author
+--
+getAuthor :: String -> IO String
+getAuthor url =
+    getJson url >>= return . show . by
+    where
+        by json = json ^. key "by" . _String
+
+--
+-- Get the commenters for that URL
+--
+getCommenters :: String -> IO [Integer]
+getCommenters url =
+    getJson url >>= return . commenters
+    where
+        commenters json =
+            head (json ^.. key "kids") ^.. values . _Integral
+
+--
+-- Get the commenters for that URL
+--
+getCommentersWithTitle :: String -> IO (String, [Integer])
+getCommentersWithTitle url = do
+    json <- getJson url
+    return (title json, commenters json)
+    where
+        commenters json =
+            head (json ^.. key "kids") ^.. values . _Integral
+        title json =
+            show $ json ^. key "title" . _String
+
+--
+-- Flatten the commenters lists retrived
+--
+allCommenters :: [(a, [b])] -> [b]
+allCommenters = concat . map snd
+
+--
+-- List the titles retrived
+--
+allTitles :: [(a, [b])] -> [a]
+allTitles = map fst
+
+--
+-- Count the number of occurence of uniques in a list
+--
+countUniq :: (Ord a) => [a] -> [(a, Int)]
+countUniq =
+    map (\xs@(x:_) -> (x, length xs)) . group . sort
+
+
+--
+-- Select the most frequent items from statistics
+--
+mostFrequent :: Int -> [(a, Int)] -> [(a, Int)]
+mostFrequent n xs =
+    take n $ sortBy (flip compare `on` snd) xs
+
+--
+-- Get names and number of comments of major commenters
+--
+mostFrequentCommenters :: Int -> [(a, [Integer])] -> IO [(String, Int)]
+mostFrequentCommenters n xs =
+    nameEachCommenters $ mostFrequentCommenters' n xs
+    where
+        mostFrequentCommenters' n xs =
+            mostFrequent n $ countUniq $ allCommenters xs
+        nameEachCommenters =
+            mapM (\(a, b) -> (getAuthor . itemURL) a >>= \a' -> return (a', b))
+
+-------------------------------------------------------------------------------
+
+main :: IO ()
+main = do
+    stories <- getTopStories 2
+    aggregate <- mapM getCommentersWithTitle (map itemURL stories)
+    print $ allTitles aggregate
+    mostFrequentCommenters 2 aggregate >>= print
