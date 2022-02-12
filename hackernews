@@ -2,22 +2,31 @@
 -- stack script --resolver lts-12.21
 
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE FlexibleContexts  #-}
 
-import           Data.Aeson            (Value)
+module Main where
+
+import           Data.Aeson             (Value)
 import           Data.Aeson.Lens
 import           Control.Lens
-import qualified Data.Yaml             as Yaml
 import           Network.HTTP.Simple
 
-import           Data.List
-import           Data.Function         (on)
+import           Data.List              (group, sort, sortBy)
+import           Data.Text              (unpack)
+import           Data.Function          (on)
 
 import           Streamly
-import qualified Streamly.Prelude      as Stream
-import           Control.Concurrent
-import           Control.Monad.IO.Class
+import           Streamly.Prelude       (toList)
+import           Control.Monad.IO.Class (liftIO)
 
 -------------------------------------------------------------------------------
+
+--
+-- Concurrent monadic processing
+--
+listAsynclyWith :: (Foldable f) => f a -> (a -> AsyncT IO b) -> IO [b]
+listAsynclyWith xs f =
+    toList . asyncly $ forEachWith async xs f
 
 --
 -- Parse JSON data from an URL
@@ -53,32 +62,30 @@ getTopStories n =
 --
 getAuthor :: String -> IO String
 getAuthor url =
-    getJson url >>= return . show . by
+    getJson url >>= return . by
     where
-        by json = json ^. key "by" . _String
+        by json = unpack $ json ^. key "by" . _String
 
 --
--- Get the commenters for that URL
+-- Get the commenters and the title of a given URL
 --
-getCommenters :: String -> IO [Integer]
-getCommenters url =
-    getJson url >>= return . commenters
-    where
-        commenters json =
-            head (json ^.. key "kids") ^.. values . _Integral
-
---
--- Get the commenters for that URL
---
-getCommentersWithTitle :: String -> IO (String, [Integer])
-getCommentersWithTitle url = do
+getCommentersAndTitle :: String -> IO (String, [Integer])
+getCommentersAndTitle url = do
     json <- getJson url
     return (title json, commenters json)
     where
-        commenters json =
-            head (json ^.. key "kids") ^.. values . _Integral
-        title json =
-            show $ json ^. key "title" . _String
+        commenters json = ids (json ^.. key "kids")
+            where
+                ids [] = []
+                ids (x:_) = x ^.. values . _Integral
+        title json = unpack $ json ^. key "title" . _String
+
+--
+-- Aggregate commenters and titles with parallel requests
+--
+aggregateCommentersWithTitle :: (Foldable f) => f Integer -> IO [(String, [Integer])]
+aggregateCommentersWithTitle stories =
+    listAsynclyWith stories $ liftIO . getCommentersAndTitle . itemURL
 
 --
 -- Flatten the commenters lists retrived
@@ -116,14 +123,16 @@ mostFrequentCommenters n xs =
     where
         mostFrequentCommenters' n xs =
             mostFrequent n $ countUniq $ allCommenters xs
-        nameEachCommenters =
-            mapM (\(a, b) -> (getAuthor . itemURL) a >>= \a' -> return (a', b))
+        nameEachCommenters xs =
+           listAsynclyWith xs $
+                (\(a, b) -> (liftIO . getAuthor . itemURL) a >>= \a' -> return (a', b))
 
 -------------------------------------------------------------------------------
 
 main :: IO ()
 main = do
-    stories <- getTopStories 2
-    aggregate <- mapM getCommentersWithTitle (map itemURL stories)
+    stories    <- getTopStories 2
+    aggregate  <- aggregateCommentersWithTitle stories
     print $ allTitles aggregate
-    mostFrequentCommenters 2 aggregate >>= print
+    commenters <- mostFrequentCommenters 2 aggregate
+    print $ commenters
