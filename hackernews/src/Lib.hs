@@ -1,25 +1,22 @@
-#!/usr/bin/env stack
--- stack script --resolver lts-12.21
-
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE FlexibleContexts  #-}
 
-module Main where
+module Lib where
 
-import           Data.Aeson             (Value)
-import           Data.Aeson.Lens
-import           Control.Lens
-import           Network.HTTP.Simple
+import Data.Aeson               (Value)
+import Data.Aeson.Lens
+import Control.Lens
+import Network.HTTP.Simple
 
-import           Data.List              (group, sort, sortBy)
-import           Data.Text              (unpack)
-import           Data.Function          (on)
+import Data.List                (group, sort, sortBy)
+import Data.Text                (unpack)
+import Data.Function            (on)
 
-import           Streamly
-import           Streamly.Prelude       (toList)
-import           Control.Monad.IO.Class (liftIO)
+import Streamly
+import Streamly.Prelude         (toList)
 
--------------------------------------------------------------------------------
+import Control.Monad.IO.Class   (liftIO)
+import Control.Exception        (catch)
 
 --
 -- Concurrent monadic processing
@@ -52,10 +49,17 @@ itemURL id =
 --
 getTopStories :: Int -> IO [Integer]
 getTopStories n =
-    getJson url >>= return . take n . stories
+    catch (getTopStoriesUnsafe) handler
     where
-        url = "https://hacker-news.firebaseio.com/v0/topstories.json"
-        stories json = json ^.. values . _Integral
+        getTopStoriesUnsafe :: IO [Integer]
+        getTopStoriesUnsafe =
+            getJson url >>= return . take n . stories
+            where
+                url = "https://hacker-news.firebaseio.com/v0/topstories.json"
+                stories json = json ^.. values . _Integral
+
+        handler :: JSONException -> IO [Integer]
+        handler _ = return []
 
 --
 -- Get the username of the item's author
@@ -126,13 +130,3 @@ mostFrequentCommenters n xs =
         nameEachCommenters xs =
            listAsynclyWith xs $
                 (\(a, b) -> (liftIO . getAuthor . itemURL) a >>= \a' -> return (a', b))
-
--------------------------------------------------------------------------------
-
-main :: IO ()
-main = do
-    stories    <- getTopStories 2
-    aggregate  <- aggregateCommentersWithTitle stories
-    print $ allTitles aggregate
-    commenters <- mostFrequentCommenters 2 aggregate
-    print $ commenters
